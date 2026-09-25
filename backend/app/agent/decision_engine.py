@@ -1,24 +1,36 @@
 """
-Decision Engine (structure only — no LLM logic yet).
+Decision Engine.
 
-This module defines what a "decision" looks like: given a TicketContext,
-the agent must eventually produce a structured Decision describing what
-it thinks should happen with the ticket.
+Given a TicketContext, this module asks Gemini to analyze the ticket
+and return a structured Decision describing what should happen next.
 
-For this milestone, only the shape is defined:
-- The Decision model itself, with constrained fields (enums).
-- A `decide_ticket` function stub with the final signature, so the rest
-  of the app (API layer, tests) can be built against a stable interface
-  before the actual reasoning is implemented.
-
-No LLM calls, no tools, no risk scoring — that comes in a later milestone.
+The model only REASONS here — it does not take actions and does not
+call tools. Risk scoring (a deterministic policy layer that can
+override the LLM's judgment) is a later milestone.
 """
 
+import os
 from enum import Enum
 
+from dotenv import load_dotenv
+from google import genai
 from pydantic import BaseModel
 
 from app.agent.context_builder import TicketContext
+
+# Loads GEMINI_API_KEY (and anything else) from the project-root .env file.
+# Safe to call even if no .env file exists.
+load_dotenv()
+
+GEMINI_MODEL = "gemini-3.8-flash"
+
+
+class DecisionEngineError(Exception):
+    """Raised when the Decision Engine can't produce a Decision.
+
+    Covers: a missing API key, a failed Gemini API call, or a response
+    that can't be parsed into a Decision.
+    """
 
 
 class Intent(str, Enum):
@@ -64,14 +76,86 @@ class Decision(BaseModel):
     reason: str
 
 
-def decide_ticket(context: TicketContext) -> Decision:
-    """Analyze a TicketContext and return a Decision.
+def _get_client() -> genai.Client:
+    """Build a Gemini client using the API key from the environment.
 
-    Not implemented yet — this milestone only defines the interface.
-    The next milestone will fill this in with an LLM call (and later,
-    risk-scoring rules that can override the LLM's own judgment).
+    Never hard-code the key — it must come from GEMINI_API_KEY, loaded
+    from the project-root .env file (see load_dotenv() above).
     """
-    raise NotImplementedError(
-        "decide_ticket() is not implemented yet — the Decision Engine "
-        "currently only defines the Decision model and function signature."
-    )
+    api_key = os.getenv("GEMINI_API_KEY")
+    if not api_key:
+        raise DecisionEngineError(
+            "GEMINI_API_KEY is not set. Add it to your project-root .env "
+            "file, e.g.:\nGEMINI_API_KEY=your-key-here"
+        )
+    return genai.Client(api_key=api_key)
+
+
+def _build_prompt(context: TicketContext) -> str:
+    """Turn a TicketContext into a clear instruction prompt for Gemini."""
+    return f"""
+You are an AI customer-service teammate working alongside a human support team.
+
+Your job right now is to ANALYZE this support ticket and decide what should
+happen next. You do NOT take any action and you do NOT call any tools —
+you only reason about the ticket and return a structured decision.
+
+Customer:
+- Name: {context.customer_name}
+- Email: {context.customer_email}
+- Plan: {context.customer_plan}
+- Lifetime value: ${context.customer_value:,.2f}
+
+Ticket:
+- Subject: {context.ticket_subject}
+- Message: {context.ticket_message}
+- Current status: {context.ticket_status}
+- Current priority: {context.ticket_priority}
+- Created at: {context.ticket_created_at.isoformat()}
+
+Take the customer's plan and lifetime value into account. Be more cautious
+(prefer escalate_to_human) for enterprise or high-value customers, for
+refund/account-change requests, and for anything that sounds urgent, angry,
+or legally sensitive. Simple informational questions from any customer can
+usually be auto-resolved or answered directly.
+
+Respond with a decision that includes: the customer's intent, the urgency,
+the recommended next action, whether a human must approve it, and a short
+reason explaining your thinking.
+""".strip()
+
+
+def decide_ticket(context: TicketContext) -> Decision:
+    """Ask Gemini to analyze a TicketContext and return a structured Decision.
+
+    Raises:
+        DecisionEngineError: if the API key is missing, the Gemini call
+            fails, or the response can't be parsed into a Decision.
+    """
+    client = _get_client()
+    prompt = _build_prompt(context)
+
+    try:
+        interaction = client.interactions.create(
+            model=GEMINI_MODEL,
+            input=prompt,
+            response_format={
+                "type": "text",
+                "mime_type": "application/json",
+                "schema": Decision.model_json_schema(),
+            },
+        )
+    except Exception as exc:
+        raise DecisionEngineError(f"Gemini API call failed: {exc}") from exc
+
+    raw_output = getattr(interaction, "output_text", None)
+    if not raw_output:
+        raise DecisionEngineError("Gemini returned an empty response.")
+
+    try:
+        return Decision.model_validate_json(raw_output)
+    except Exception as exc:
+        raise DecisionEngineError(
+            f"Could not parse Gemini's response into a Decision: {exc}\n"
+            f"Raw response was: {raw_output}"
+        ) from exc
