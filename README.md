@@ -36,8 +36,6 @@ CORA is an AI customer-service teammate designed to move beyond
 chat-based support.
 
 
-
-
 CORA (Contextual Operations & Resolution Agent) is an AI-powered customer-service teammate designed to transform support operations from simple question-answering into controlled, actionable workflows. 
 It receives a customer ticket, builds a complete context using customer and ticket information, and uses Gemini to understand the customer's intent, determine urgency, recommend an appropriate action, and explain its reasoning. 
 The resulting AI decision is then passed through a deterministic Risk / Autonomy Gate, which evaluates whether the proposed action can be performed autonomously or requires human approval. 
@@ -46,6 +44,9 @@ Once approved, CORA executes the supported action through backend tools and upda
 In this way, CORA combines AI reasoning, deterministic safety controls, human oversight, and real operational execution to act as a teammate that helps move a customer issue from context → decision → approval → action → resolution.
 
 
+
+
+```text
 
 
 
